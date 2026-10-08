@@ -44,7 +44,7 @@ yolo_studio/
 | PyTorch | 2.9.0 | CPU 版实测；GPU 部署需与服务器驱动匹配的 CUDA 版 |
 | torchvision | 0.24.0 | 与 torch 2.9.0 配套 |
 | Ultralytics | 8.4.80 | 训练/推理均使用官方 API |
-| Gradio | 5.50.0 | Web UI |
+| Gradio | 5.50.0（实测 5.23.0 也可用） | Web UI，5.23 ~ 5.50 均已验证 |
 | 其它 | PyYAML / Pillow / numpy / pandas | 见 `requirements.txt` |
 
 **PyTorch 与 CUDA 兼容性**：`torch` 的 CUDA 版本必须是服务器驱动支持的版本（不确定就用 CPU 版先跑通流程）。
@@ -309,6 +309,31 @@ CPU 训练慢属正常。GPU 训练时可适当提高 `Workers`；`Batch Size` �
 ## 9. 实际验证结果摘要
 
 验证环境：**Windows 11 + Python 3.12.12 + torch 2.9.0+cpu（无 GPU）+ ultralytics 8.4.80 + gradio 5.50.0**
+部署环境：**内网 tp001（172.28.40.170）+ Python 3.10.4 + torch 2.6.0（无 GPU）+ ultralytics 8.4.80 + gradio 5.23.0**
+
+### 9.0 内网测试机部署记录
+
+| 项 | 值 |
+|---|---|
+| 主机 | `172.28.40.170`（tp001），无 GPU，80 核 / 251G 内存 |
+| 代码目录 | `/data/wangke/vibe_coding/yolo_studio`（与 git commit 内容一致，部署的 commit 记录在同目录 `DEPLOY_COMMIT`） |
+| Python 环境 | `/data/anaconda3/envs/llm`（共享环境，仅新增 `ultralytics / ultralytics-thop / nvidia-ml-py`，未改动 torch/numpy/gradio） |
+| 数据目录 | `/data/wangke/vibe_coding/yolo_studio/storage` |
+| 访问地址 | **http://172.28.40.170:7870**（7860 已被机器的 `es_gradio.py` 占用，故使用 7870） |
+| 服务管理 | systemd：`yolo-studio.service`（`enable` 开机自启，`Restart=always`） |
+
+```bash
+systemctl status yolo-studio        # 查看状态
+systemctl restart yolo-studio       # 重启
+journalctl -u yolo-studio -f        # 查看服务日志（训练日志在 storage/runs/{run_id}/train.log）
+```
+
+启用访问认证（可选）：编辑 `/etc/systemd/system/yolo-studio.service`，加入
+`Environment=YOLO_STUDIO_USER=xxx` 与 `Environment=YOLO_STUDIO_PASSWORD=xxx`，然后
+`systemctl daemon-reload && systemctl restart yolo-studio`。
+
+更新部署：本地改完提交后，`git archive --format=tar HEAD | ssh root@172.28.40.170 "tar xzf - -C /data/wangke/vibe_coding/yolo_studio"`
+（该机器在内网，不能直接 `git pull` GitHub）。
 
 ### 9.1 自动化测试
 
@@ -337,6 +362,14 @@ python -m pytest   →   86 passed（含真实训练端到端测试，约 1~2 �
 另有一次**用户真实数据**的训练（本机浏览器操作）：数据集 `coco8-seg`（nc=80，训练 4 / 验证 4）+
 模型 `yolo11n-seg`，50 epochs / batch 8 / imgsz 640 / CPU，3 分 22 秒完成，
 最优 **Mask mAP50 = 0.847 / Mask mAP50-95 = 0.577**，`best.pt` 自动注册为可用模型。
+
+### 9.2.1 内网测试机（tp001）上的同样验收
+
+在同一份代码部署到 `172.28.40.170:7870`、使用该机 Python 3.10 + gradio 5.23.0 + torch 2.6.0 后，
+用本地机器跨网络执行 `python tests/verify_live_e2e.py http://172.28.40.170:7870` → **7/7 全部通过**：
+数据集导入（类别数 1 / 训练 4 / 验证 2）→ 权重上传（6.43 MB）→ 训练启动并完成（日志 3→80 行）→
+最优 Mask mAP50 0.0000（未训练权重 1 epoch，符合预期）→ 下载 best.pt 6574 KB 与 results.csv →
+在线推理结果图生成成功。
 
 ### 9.3 异常的输入处理
 

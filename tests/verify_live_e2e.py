@@ -80,7 +80,9 @@ def main(url: str) -> int:
 
     work = Path(tempfile.mkdtemp(prefix="yolo_verify_"))
     print(f"[1/7] 连接服务 {url} ...")
-    client = Client(url, verbose=False)
+    # 跨机器/慢网络上传大权重时，gradio_client 默认超时偏短，可通过环境变量放宽
+    http_timeout = float(os.environ.get("VERIFY_HTTP_TIMEOUT", "120"))
+    client = Client(url, verbose=False, httpx_kwargs={"timeout": http_timeout})
     # 预检：确认连到的是 YOLO Studio Lite，而不是本机其它 Gradio 应用
     info = client.view_api(return_format="dict")
     names = set(info.get("named_endpoints", {}).keys())
