@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core import config, training  # noqa: E402
-from helpers import build_tiny_detect_pt, build_tiny_seg_pt  # noqa: E402
+from helpers import build_tiny_cls_pt, build_tiny_detect_pt, build_tiny_seg_pt  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -48,5 +48,11 @@ def tiny_seg_pt(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="session")
 def tiny_detect_pt(tmp_path_factory) -> Path:
-    """真实的 YOLO-Detect 权重（nc=1），用于验证非 segment 模型会被拒绝。"""
+    """真实的 YOLO-Detect 权重（nc=1，目标检测）。"""
     return build_tiny_detect_pt(tmp_path_factory.mktemp("weights") / "tiny_detect.pt", nc=1)
+
+
+@pytest.fixture(scope="session")
+def tiny_cls_pt(tmp_path_factory) -> Path:
+    """真实的 YOLO-Classify 权重，用于验证不支持的任务类型会被拒绝。"""
+    return build_tiny_cls_pt(tmp_path_factory.mktemp("weights") / "tiny_cls.pt", nc=2)

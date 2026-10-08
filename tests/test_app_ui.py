@@ -96,9 +96,43 @@ def test_ui_model_flow(app_module, tiny_seg_pt, tmp_path):
     assert "已删除" in msg_yes
 
 
-def test_ui_model_reject_detect(app_module, tiny_detect_pt):
-    msg, _, _, _ = app_module.ui_upload_model(str(tiny_detect_pt), "检测模型")
-    assert "上传失败" in msg and "segment" in msg
+def test_ui_model_reject_classify(app_module, tiny_cls_pt):
+    msg, _, _, _ = app_module.ui_upload_model(str(tiny_cls_pt), "分类模型")
+    assert "上传失败" in msg and "classify" in msg
+
+
+def test_ui_detect_flow(app_module, tmp_path, tiny_detect_pt):
+    """检测数据集 + 检测模型在界面层可用，任务类型正确展示。"""
+    from helpers import build_dataset_zip
+
+    zip_path = build_dataset_zip(tmp_path / "det.zip", label_mode="detection")
+    msg, table, dropdown = app_module.ui_import_dataset(str(zip_path), "界面检测集")
+    assert "导入成功" in msg
+    assert _cell(table, 0, 1) == "detect"          # 任务列
+    dataset_id = dropdown.value
+    info = app_module.ui_dataset_info(dataset_id)
+    assert "detect（目标检测）" in info and "检测框标签" in info
+
+    msg, table, train_dd, infer_dd = app_module.ui_upload_model(str(tiny_detect_pt), "界面检测模型")
+    assert "上传成功" in msg and "detect" in msg
+    assert "detect（目标检测）" in app_module.ui_model_info(train_dd.value)
+
+    # 检测模型 + 检测数据集：允许启动（随后立即停止）
+    start_msg, *_ = app_module.ui_start_training(dataset_id, train_dd.value, 20, 2, 320, "cpu", 0, "界面检测训练")
+    assert "训练任务已启动" in start_msg
+    stop_msg, *_ = app_module.ui_stop_training()
+    assert "已停止" in stop_msg
+
+
+def test_ui_combination_error_message(app_module, tmp_path, tiny_seg_pt):
+    """segment 模型 + 检测数据集：界面给出明确错误提示。"""
+    from helpers import build_dataset_zip
+
+    zip_path = build_dataset_zip(tmp_path / "det2.zip", label_mode="detection")
+    _, _, dropdown = app_module.ui_import_dataset(str(zip_path), "界面检测集2")
+    _, _, train_dd, _ = app_module.ui_upload_model(str(tiny_seg_pt), "界面分割模型")
+    start_msg, *_ = app_module.ui_start_training(dropdown.value, train_dd.value, 1, 2, 320, "cpu", 0, "")
+    assert "无法启动训练" in start_msg and "需要多边形标签" in start_msg
 
 
 def test_ui_inference_requires_inputs(app_module):

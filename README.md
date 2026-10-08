@@ -1,14 +1,18 @@
 # YOLO Studio Lite
 
-轻量级 YOLO **实例分割（segment）** Web 管理平台，用于公司内网部署。所有操作在浏览器完成，
-数据保存在服务器本地文件系统，不依赖数据库、Redis、消息队列、云平台或任何公网服务。
+轻量级 YOLO Web 管理平台，支持 **实例分割（segment）** 与 **目标检测（detect）**，用于公司内网部署。
+所有操作在浏览器完成，数据保存在服务器本地文件系统，不依赖数据库、Redis、消息队列、云平台或任何公网服务。
 
 - 技术栈：Python 3.11+ / Gradio Blocks / Ultralytics / PyTorch
 - 四个页面：**① 数据集管理 ② 模型管理 ③ 模型训练 ④ 在线推理**
 - 训练在独立子进程中执行，界面可实时查看日志、状态与指标
 
-> V1 范围：仅支持 Ultralytics YOLO **实例分割（segment）**。不支持图片标注、检测/分类/姿态任务、
-> 多 GPU、超参搜索、用户权限体系、ONNX/TensorRT 导出。
+> 支持范围：Ultralytics YOLO **segment（实例分割）** 与 **detect（目标检测）**。
+> 不支持图片标注、classify/pose 任务、多 GPU、超参搜索、用户权限体系、ONNX/TensorRT 导出。
+>
+> 任务组合规则：segment 模型 ↔ 分割数据集；detect 模型 ↔ 检测数据集；
+> **detect 模型 + 分割数据集** 会把多边形标签自动转换为外接框（框精度看 Box mAP）；
+> segment 模型 + 检测数据集会被明确拒绝。
 
 ---
 
@@ -20,9 +24,9 @@ yolo_studio/
 ├── train_worker.py        # 训练子进程入口（独立进程调用 Ultralytics）
 ├── core/
 │   ├── config.py          # 路径与全局配置（全部可通过环境变量覆盖）
-│   ├── datasets.py        # ZIP 安全解压、结构校验、标签逐行校验、预览、删除
-│   ├── models.py          # .pt 校验（任务类型）、模型索引、删除
-│   ├── training.py        # 训练配置校验、子进程启动/监控/停止、指标读取、历史记录
+│   ├── datasets.py        # ZIP 安全解压、结构校验、标签逐行校验（分割/检测）、预览、删除
+│   ├── models.py          # .pt 校验（segment / detect）、模型索引、删除
+│   ├── training.py        # 训练配置与任务组合校验、子进程启动/监控/停止、指标读取（Mask/Box mAP）、历史记录
 │   └── inference.py       # 单张图片推理、可视化、按实例统计
 ├── storage/               # 运行时数据（数据集 / 模型 / 训练记录），可挂载宿主机目录
 │   ├── datasets/{dataset_id}/  (data.yaml, images/, labels/, meta.json)
@@ -153,6 +157,16 @@ dataset.zip
     └── val/*.txt
 ```
 
+标签格式（两种都支持，导入时按标签自动识别任务类型）：
+
+```
+# 实例分割（segment）：多边形，至少 3 个点
+0 0.10 0.10 0.90 0.20 0.30 0.90
+
+# 目标检测（detect）：中心点 + 宽高
+0 0.50 0.50 0.20 0.30
+```
+
 `data.yaml` 示例：
 
 ```yaml
@@ -171,8 +185,10 @@ names:
 - 必须存在 `data.yaml`；`train` / `val` 图片目录必须存在且非空
 - 图片仅支持 `jpg / jpeg / png`；允许背景图没有对应标签文件
 - `names` 必须有效，类别 ID 从 0 连续编号，`nc` 与 `names` 数量一致
-- 标签必须是 YOLO-Seg 格式：`class_id x1 y1 x2 y2 ...`（多边形 ≥ 3 个点、坐标 0~1、
-  数值有限、`class_id` 必须存在于 `names`）；**不接受检测框（4 坐标）标签**
+- 标签校验：坐标必须为 0~1 的有限数值，`class_id` 必须存在于 `names`；
+  分割标签要求多边形 ≥ 3 个点且坐标数为偶数，检测标签要求 4 个坐标且宽高 > 0；
+  **同一数据集混用两种格式会被拒绝**（提示统一标签格式）
+- 任务类型按标签格式自动判定并显示在数据集列表与详情中
 - ZIP 解压防护：拒绝路径穿越（`..`）、绝对路径、符号链接、特殊文件、超限解压（解压炸弹）
 - 导入成功后重新生成内部 `data.yaml`，`path` 指向存储目录，`train/val` 保持原结构
 
@@ -181,7 +197,7 @@ names:
 
 ### 5.2 模型上传（Tab ②）
 
-- 只接受 Ultralytics **segment** 模型的 `.pt`（detect/classify/pose 会被拒绝并提示实际任务类型）
+- 接受 Ultralytics **segment / detect** 模型的 `.pt`（classify / pose 会被拒绝并提示实际任务类型）
 - 上传时会实际加载权重文件校验：损坏文件、非 PyTorch 归档、空文件都会给出明确错误
 - 同名模型不会互相覆盖（内部使用唯一 ID）
 - 训练完成后产生的 `best.pt` **自动加入模型列表**，可直接用于继续微调或推理
@@ -191,14 +207,14 @@ names:
 
 ### 5.3 训练（Tab ③）
 
-1. 选择数据集与 segment 模型
+1. 选择数据集与模型（下拉里会显示两者的任务类型）
 2. 设置 `Epochs / Batch Size / Image Size / Device / Workers / 训练名称`
    （Image Size 可选 320 / 480 / 640 / 960 / 1280，Device 自动列出可用 CUDA 设备与 CPU）
 3. 点击「🚀 开始训练」→ 服务端生成唯一 `run_id`，**以独立子进程**启动训练
-4. 页面每 3 秒刷新：状态（任务 ID、状态、开始/结束时间、已运行时间、已完成 Epoch/总 Epoch、GPU 显存）、
-   日志尾部（最多 200 行，自动滚动）、指标曲线（Train/Val Box Loss、Train/Val Seg Loss、Mask mAP50、Mask mAP50-95）
-5. 训练结束后展示：最优 Mask mAP50 / Mask mAP50-95、best.pt、last.pt、results.csv、训练结果图，
-   并自动把 best.pt 注册为模型
+4. 页面每 3 秒刷新：状态（任务 ID、任务类型、状态、开始/结束时间、已运行时间、已完成 Epoch/总 Epoch、GPU 显存）、
+   日志尾部（最多 200 行，自动滚动）、指标曲线（Train/Val Box Loss、Train/Val Seg Loss 等损失，
+   以及 **segment → Mask mAP50 / mAP50-95**、**detect → Box mAP50 / mAP50-95**）
+5. 训练结束后展示：最优 mAP、best.pt、last.pt、results.csv、训练结果图，并自动把 best.pt 注册为模型
 
 规则：
 - **单任务模式**：同一时间只允许一个训练任务，重复点击不会产生多个训练进程
@@ -206,15 +222,16 @@ names:
 - 状态：`RUNNING / COMPLETED / FAILED / STOPPED / INTERRUPTED`
 - 服务重启后历史记录保留；无法确认状态的旧任务标记为 `INTERRUPTED`，**不自动恢复**，也不占用训练锁
 - 指标全部来自 `results.csv` 的真实输出；不同 Ultralytics 版本的列名差异做了兼容映射，
+  并按任务类型选择掩码列（`metrics/mAP50(M)`）或检测框列（`metrics/mAP50(B)`）；
   **缺失的指标显示为缺失，不会用 0 填充**
 
-历史记录（Tab ③ 下方）：任务 ID / 名称 / 数据集 / 基础模型 / Epochs / 状态 / 开始时间 / Mask mAP50-95，
+历史记录（Tab ③ 下方）：任务 ID / 名称 / 任务 / 数据集 / 基础模型 / Epochs / 状态 / 开始时间 / mAP50-95，
 选择后可查看配置、日志、指标与结果摘要，并下载 `best.pt`、`results.csv`
 （即使数据集后来被删除，历史任务仍保留原始元信息）。
 
 ### 5.4 在线推理（Tab ④）
 
-1. 选择一个模型（上传的或训练产出的）
+1. 选择一个模型（上传的或训练产出的，segment / detect 均可）
 2. 上传一张 jpg/jpeg/png 图片，设置 Conf Threshold 与 Image Size
 3. 点击「🔍 开始推理」→ 展示原图、分割结果图、检测到的**实例总数**与各类别实例数，并可下载结果图
 
@@ -236,11 +253,11 @@ python -m pytest -m "not slow"      # 跳过端到端训练测试
 
 | 测试文件 | 内容 |
 |---|---|
-| `tests/test_datasets.py` | 正常导入（含嵌套根目录、多类别、背景图）、缺 data.yaml、空 val、nc/names 异常、标签 8 类格式错误、路径穿越、绝对路径、符号链接、解压炸弹、非 ZIP、删除与占用保护、预览 |
-| `tests/test_models.py` | 真实 segment 权重上传、detect 模型拒绝、假 .pt/空文件/非 torch 归档拒绝、同名不覆盖、best.pt 幂等注册、删除与占用保护 |
-| `tests/test_training.py` | 参数范围校验、设备校验、启动前置校验、单任务互斥、停止（进程组终止）、服务重启标记 INTERRUPTED、指标列名兼容与**缺失不填 0**、截断 CSV 容错、历史记录、**真实 1-epoch CPU 端到端训练**（产物 + 指标 + 自动注册模型） |
-| `tests/test_inference.py` | 输入校验（模型/图片/conf/imgsz）、GPU 训练时禁止 GPU 推理、真实推理结果结构、未检测到目标路径 |
-| `tests/test_app_ui.py` | Gradio 页面可构建、四个 Tab 与全部回调存在、数据集/模型/推理/历史记录 UI 回调真实数据流、错误提示文案 |
+| `tests/test_datasets.py` | 分割/检测数据集正常导入（含嵌套根目录、多类别、背景图）、检测框与多边形混用拒绝、缺 data.yaml、空 val、nc/names 异常、各类标签格式错误、路径穿越、绝对路径、符号链接、解压炸弹、非 ZIP、删除与占用保护、两种任务的预览 |
+| `tests/test_models.py` | 真实 segment 与 detect 权重上传、classify 模型拒绝、假 .pt/空文件/非 torch 归档拒绝、同名不覆盖、best.pt 幂等注册、按任务过滤、删除与占用保护 |
+| `tests/test_training.py` | 参数范围校验、设备校验、**任务组合规则**（segment+检测数据集拒绝 / detect+分割数据集给出自动转框提示）、单任务互斥、停止（进程组终止）、服务重启标记 INTERRUPTED、Mask/Box 指标列名兼容与**缺失不填 0**、截断 CSV 容错、历史记录、**真实 1-epoch CPU 端到端训练 ×2（segment 与 detect）** |
+| `tests/test_inference.py` | 输入校验（模型/图片/conf/imgsz）、不支持任务类型拒绝、GPU 训练时禁止 GPU 推理、segment/detect 真实推理结果结构、未检测到目标路径 |
+| `tests/test_app_ui.py` | Gradio 页面可构建、四个 Tab 与全部回调存在、数据集/模型/推理/历史记录 UI 回调真实数据流、检测流程与任务组合错误提示文案 |
 
 测试用的数据集与权重**全部离线生成**（`tests/helpers.py` 用 ultralytics 自带 yaml 构造真实
 segment/detect 权重，不下载任何外部资源），可反复运行。
@@ -275,8 +292,16 @@ CPU 训练慢属正常。GPU 训练时可适当提高 `Workers`；`Batch Size` �
 本机安装了 `mlflow` 包时，Ultralytics 会自动启用 MLflow 记录。平台的训练子进程已把工作目录
 设为该任务的 run 目录，不会污染项目根目录；如需彻底关闭可执行 `yolo settings mlflow=False`。
 
-**Q：能上传 detect 模型吗？**
-不能。V1 只支持 segment，上传 detect 模型会提示实际任务类型并被拒绝。
+**Q：能上传检测（detect）数据集和模型吗？**
+可以。检测标签（`cls cx cy w h`）会被自动识别为 detect 任务，detect 模型也能正常上传、训练与推理；
+指标面板对 detect 显示 **Box mAP**，对 segment 显示 **Mask mAP**。
+
+**Q：detect 模型能配分割数据集训练吗？**
+可以。Ultralytics 会把多边形标签自动转换为外接框，界面会给出提示（精度看 Box mAP）。
+反过来 **segment 模型 + 检测数据集会被拒绝**（分割训练需要多边形标签）。
+
+**Q：能上传 classify / pose 模型吗？**
+不能。这两类任务不在支持范围内，上传时会提示模型的真实任务类型并被拒绝。
 
 **Q：训练产物在哪？**
 `storage/runs/{run_id}/output/`（`weights/best.pt`、`weights/last.pt`、`results.csv`、结果图），
@@ -311,6 +336,8 @@ CPU 训练慢属正常。GPU 训练时可适当提高 `Workers`；`Batch Size` �
 验证环境：**Windows 11 + Python 3.12.12 + torch 2.9.0+cpu（无 GPU）+ ultralytics 8.4.80 + gradio 5.50.0**
 部署环境：**内网 tp001（172.28.40.170）+ Python 3.10.4 + torch 2.6.0（无 GPU）+ ultralytics 8.4.80 + gradio 5.23.0**
 
+支持的两种任务（segment 实例分割 / detect 目标检测）在本地与部署机上都做了真实训练验证。
+
 ### 9.0 内网测试机部署记录
 
 | 项 | 值 |
@@ -338,12 +365,14 @@ journalctl -u yolo-studio -f        # 查看服务日志（训练日志在 stora
 ### 9.1 自动化测试
 
 ```
-python -m pytest   →   86 passed（含真实训练端到端测试，约 1~2 分钟）
+python -m pytest   →   101 passed（含 2 个真实训练端到端测试，约 1.5 分钟）
+python -m pytest -m "not slow"   →   99 passed（跳过端到端训练）
 ```
 
-其中端到端测试 `test_training_end_to_end_cpu` 真实执行了 1 个 epoch 的 CPU 训练并断言：
-子进程启动 → 日志写入 → `results.csv` 生成 → 指标解析出真实 Loss/mAP → `best.pt`/`last.pt`/`results.png`
-存在 → `best.pt` 自动注册为模型。**未使用任何模拟数据。**
+其中端到端测试 `test_training_end_to_end_cpu`（segment）与 `test_training_end_to_end_detect_cpu`（detect）
+真实执行了 1 个 epoch 的 CPU 训练并断言：子进程启动 → 日志写入 → `results.csv` 生成 →
+指标解析出真实 Loss/mAP（segment 取 `metrics/mAP50(M)`，detect 取 `metrics/mAP50(B)`）→
+`best.pt`/`last.pt`/`results.png` 存在 → `best.pt` 自动注册为模型。**未使用任何模拟数据。**
 
 ### 9.2 运行中服务的完整验收（HTTP，等价浏览器操作）
 
@@ -358,6 +387,10 @@ python -m pytest   →   86 passed（含真实训练端到端测试，约 1~2 �
 | 5 轮询状态/日志/指标 | ✓ 日志 0→81 行，RUNNING → COMPLETED |
 | 6 结果摘要 + 下载产物 | ✓ 最优 Mask mAP50 0.0125(epoch 1)，best.pt 6575 KB、results.csv 下载成功 |
 | 7 在线推理 | ✓ 分割结果图生成成功 |
+
+同一脚本支持检测任务（`python tests/verify_live_e2e.py <url> detect`），本地同样 **7/7 通过**：
+检测数据集导入（识别为 detect 任务）→ detect 权重上传 → 训练完成（日志 3→81 行）→
+结果摘要显示 **最优 Box mAP50** → 下载 best.pt 6057 KB 与 results.csv → 推理出结果图。
 
 另有一次**用户真实数据**的训练（本机浏览器操作）：数据集 `coco8-seg`（nc=80，训练 4 / 验证 4）+
 模型 `yolo11n-seg`，50 epochs / batch 8 / imgsz 640 / CPU，3 分 22 秒完成，

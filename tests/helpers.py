@@ -23,16 +23,24 @@ def _image_bytes(color: tuple[int, int, int]) -> bytes:
 
 
 def _label_lines(mode: str, cls: int = 0) -> str:
-    """按模式生成标签内容。"""
+    """按模式生成标签内容。
+
+    valid / detection → 合法标签（多边形 / 检测框）；其余为各类非法标签。
+    """
     poly = "0.10 0.10 0.90 0.20 0.30 0.90"
+    box = "0.50 0.50 0.20 0.30"
     if mode == "valid":
         return f"{cls} {poly}\n"
     if mode == "detection":
-        return f"{cls} 0.50 0.50 0.20 0.30\n"          # 检测框格式（4 个坐标）
-    if mode == "two_points":
-        return f"{cls} 0.10 0.10 0.90 0.90\n"           # 只有 2 个点
+        return f"{cls} {box}\n"                     # 检测框格式（4 个坐标）
+    if mode == "three_coords":
+        return f"{cls} 0.10 0.10 0.90\n"            # 3 个坐标：既不是框也不是多边形
     if mode == "out_of_range":
         return f"{cls} 0.10 0.10 1.50 0.20 0.30 0.90\n"
+    if mode == "box_out_of_range":
+        return f"{cls} 1.50 0.50 0.20 0.30\n"
+    if mode == "box_zero_size":
+        return f"{cls} 0.50 0.50 0.00 0.30\n"
     if mode == "negative":
         return f"{cls} -0.10 0.10 0.90 0.20 0.30 0.90\n"
     if mode == "nan":
@@ -44,6 +52,15 @@ def _label_lines(mode: str, cls: int = 0) -> str:
     if mode == "float_class":
         return f"0.0 {poly}\n"
     raise ValueError(mode)
+
+
+def _mode_for(label_mode: str, index: int) -> str:
+    """同一数据集内每张图使用的标签模式（用于构造混用格式的数据集）。"""
+    if label_mode == "mixed":
+        return "detection" if index % 2 == 0 else "valid"
+    if label_mode == "background_mixed":
+        return "valid"
+    return label_mode
 
 
 def build_dataset_zip(
@@ -62,7 +79,11 @@ def build_dataset_zip(
     extra_members: list[tuple[str, bytes]] | None = None,
     symlink_members: list[str] | None = None,
 ) -> Path:
-    """构造一个 YOLO-Seg 数据集 ZIP。label_mode_train 可单独指定 train 的标签模式。"""
+    """构造一个 YOLO 数据集 ZIP。
+
+    label_mode 可取 valid（多边形/分割）、detection（检测框）、mixed（两种混用）
+    以及各种非法格式，详见 _label_lines。label_mode_train 可单独指定 train 的模式。
+    """
     zip_path = Path(zip_path)
     prefix = "my_dataset/" if nested else ""
     train_mode = label_mode_train or label_mode
@@ -82,7 +103,7 @@ def build_dataset_zip(
                 continue
             if label_mode == "background_mixed" and i % 2 == 1:
                 continue  # 一半图片没有标签文件（背景图）
-            mode = "valid" if label_mode == "background_mixed" else train_mode
+            mode = "valid" if label_mode == "background_mixed" else _mode_for(train_mode, i)
             zf.writestr(prefix + f"labels/train/{name[:-4]}.txt", _label_lines(mode))
 
         if n_val:
@@ -93,7 +114,8 @@ def build_dataset_zip(
                 if not empty_val:
                     zf.writestr(prefix + f"images/val/{name}", _image_bytes((120, 60 + i * 8, 60)))
                     if not all_labels_missing:
-                        zf.writestr(prefix + f"labels/val/{name[:-4]}.txt", _label_lines("valid"))
+                        mode = _mode_for(train_mode, 100 + i)  # 与 train 保持同一格式族
+                        zf.writestr(prefix + f"labels/val/{name[:-4]}.txt", _label_lines(mode))
 
         for name, data in extra_members or []:
             zf.writestr(prefix + name, data)
@@ -129,7 +151,7 @@ def build_tiny_seg_pt(out_path: Path, nc: int = 1) -> Path:
 
 
 def build_tiny_detect_pt(out_path: Path, nc: int = 1) -> Path:
-    """构造一个真实的 detect 权重（用于验证非 segment 模型会被拒绝）。"""
+    """构造一个真实的 detect 权重（目标检测）。"""
     import ultralytics
     from ultralytics import YOLO
 
@@ -140,6 +162,24 @@ def build_tiny_detect_pt(out_path: Path, nc: int = 1) -> Path:
     cfg = yaml.safe_load(src.read_text(encoding="utf-8"))
     cfg["nc"] = nc
     tmp_yaml = out_path.parent / f"yolov8n-detect-nc{nc}.yaml"
+    tmp_yaml.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    model = YOLO(str(tmp_yaml))
+    model.save(str(out_path))
+    return out_path
+
+
+def build_tiny_cls_pt(out_path: Path, nc: int = 2) -> Path:
+    """构造一个真实的 classify 权重（用于验证不支持的任务类型会被拒绝）。"""
+    import ultralytics
+    from ultralytics import YOLO
+
+    out_path = Path(out_path)
+    if out_path.exists():
+        return out_path
+    src = Path(ultralytics.__file__).parent / "cfg" / "models" / "v8" / "yolov8-cls.yaml"
+    cfg = yaml.safe_load(src.read_text(encoding="utf-8"))
+    cfg["nc"] = nc
+    tmp_yaml = out_path.parent / f"yolov8n-cls-nc{nc}.yaml"
     tmp_yaml.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     model = YOLO(str(tmp_yaml))
     model.save(str(out_path))

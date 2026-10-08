@@ -18,7 +18,9 @@ class ModelError(Exception):
 
 
 def _inspect_pt(path: Path) -> dict:
-    """检查 .pt 文件是否为可用的 YOLO 模型，返回 {'task', 'nc', 'names'}。
+    """检查 .pt 文件是否为受支持的 YOLO 模型，返回 {'task', 'nc', 'names'}。
+
+    支持 segment（实例分割）与 detect（目标检测）；classify / pose / obb 会被拒绝。
 
     注意：.pt 的反序列化存在安全风险，本平台仅允许受信任人员上传权重。
     后缀与格式校验只是基本的健全性检查，不构成安全保证。
@@ -40,9 +42,10 @@ def _inspect_pt(path: Path) -> dict:
     except Exception as e:  # noqa: BLE001 - 统一转换为友好的错误提示
         raise ModelError(f"无法加载权重文件，可能不是有效的 YOLO 模型: {e}")
 
-    if task != "segment":
+    if task not in config.SUPPORTED_TASKS:
         raise ModelError(
-            f"该模型的任务类型为「{task or '未知'}」，V1 仅支持 Ultralytics YOLO 实例分割（segment）模型"
+            f"该模型的任务类型为「{task or '未知'}」，本平台只支持 "
+            "segment（实例分割）与 detect（目标检测）模型"
         )
     names = getattr(model, "names", {}) or {}
     return {"task": task, "nc": len(names), "names": [str(v) for v in names.values()][:50]}
@@ -91,8 +94,8 @@ def register_run_best(run_id: str, best_pt: str | Path, name: str | None = None)
     return import_model_file(best_pt, name=name, source="training", run_id=run_id)
 
 
-def list_models(task: str | None = "segment") -> list[dict]:
-    """列出已导入模型（按导入时间倒序），可按任务类型过滤。"""
+def list_models(task: str | None = None) -> list[dict]:
+    """列出已导入模型（按导入时间倒序）；task 为空时返回全部任务类型。"""
     config.ensure_dirs()
     metas = []
     for d in config.MODELS_DIR.iterdir():

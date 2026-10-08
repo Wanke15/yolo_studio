@@ -20,11 +20,13 @@ def _import(tmp_path, **kwargs):
 # ---------------------------------------------------------------- 正常导入
 def test_import_valid_dataset(tmp_path):
     meta = _import(tmp_path)
+    assert meta["task"] == "segment"
     assert meta["nc"] == 1
     assert meta["train_images"] == 4
     assert meta["val_images"] == 2
     assert meta["names"] == {"0": "shape"}
     assert meta["status"] == "有效"
+    assert meta["splits"]["train"]["formats"] == ["polygon"]
     # 落盘结构
     ddir = config.DATASETS_DIR / meta["id"]
     assert (ddir / "data.yaml").is_file()
@@ -34,6 +36,29 @@ def test_import_valid_dataset(tmp_path):
     text = (ddir / "data.yaml").read_text(encoding="utf-8")
     assert str(ddir).replace("\\", "/") in text.replace("\\", "/")
     assert datasets.dataset_yaml_path(meta["id"]).is_file()
+
+
+def test_import_detect_dataset(tmp_path):
+    """检测框标签（cls cx cy w h）应被识别为 detect 数据集。"""
+    meta = _import(tmp_path, label_mode="detection")
+    assert meta["task"] == "detect"
+    assert meta["train_images"] == 4
+    assert meta["val_images"] == 2
+    assert meta["splits"]["train"]["formats"] == ["box"]
+    assert meta["splits"]["train"]["box_instances"] == 4
+    assert meta["splits"]["train"]["polygon_instances"] == 0
+    info = datasets.dataset_info_markdown(meta)
+    assert "detect（目标检测）" in info and "检测框标签" in info
+    # 表格里有任务列
+    rows = datasets.dataset_table_rows([meta])
+    assert rows[0][0] == meta["name"] and rows[0][1] == "detect"
+
+
+def test_mixed_label_formats_rejected(tmp_path):
+    """同一数据集混用检测框与分割标签应被拒绝。"""
+    with pytest.raises(datasets.DatasetError, match="混用了检测框标签"):
+        _import(tmp_path, label_mode="mixed")
+    assert list(config.DATASETS_DIR.iterdir()) == []
 
 
 def test_import_nested_root_dir(tmp_path):
@@ -62,7 +87,7 @@ def test_list_and_get_dataset(tmp_path):
     assert len(rows) == 1 and rows[0]["id"] == meta["id"]
     assert datasets.get_dataset(meta["id"])["name"] == "测试数据集"
     table = datasets.dataset_table_rows(rows)
-    assert table[0][0] == "测试数据集" and table[0][4] == 4
+    assert table[0][0] == "测试数据集" and table[0][5] == 4  # 名称 / 训练图片数
     assert "测试数据集" in datasets.dataset_info_markdown(meta)
 
 
@@ -73,6 +98,13 @@ def test_preview_images(tmp_path):
     assert all(img.size[0] > 0 for img, _ in images)
     overlay = datasets.preview_images(meta["id"], count=4, overlay=True, split="train")
     assert len(overlay) == 4
+
+
+def test_preview_detect_dataset_overlay(tmp_path):
+    """检测数据集的标签叠加预览（画矩形）不应报错。"""
+    meta = _import(tmp_path, label_mode="detection")
+    images = datasets.preview_images(meta["id"], count=4, overlay=True, split="all")
+    assert len(images) == 4
 
 
 # ---------------------------------------------------------------- 结构错误
@@ -118,9 +150,10 @@ def test_names_empty(tmp_path):
 @pytest.mark.parametrize(
     "mode, expect",
     [
-        ("detection", "分割多边形至少需要 3 个点"),
-        ("two_points", "分割多边形至少需要 3 个点"),
+        ("three_coords", "既不是检测框"),
         ("out_of_range", "超出 0~1 归一化范围"),
+        ("box_out_of_range", "超出 0~1 归一化范围"),
+        ("box_zero_size", "检测框宽/高必须大于 0"),
         ("negative", "超出 0~1 归一化范围"),
         ("nan", "NaN/Inf"),
         ("odd", "不是偶数"),

@@ -246,13 +246,24 @@ def _img_to_label_path(img: Path, root: Path) -> Path:
 
 
 # ================================================================ 标签逐行校验
-def _validate_label_file(label_path: Path, names: dict[int, str]) -> tuple[int, list[str]]:
-    """校验单个标签文件，返回 (目标实例数, 错误信息列表)。空文件允许（背景图）。"""
+LABEL_FORMAT_BOX = "box"          # cls cx cy w h
+LABEL_FORMAT_POLYGON = "polygon"  # cls x1 y1 x2 y2 ...（多边形 ≥ 3 个点）
+
+
+def _validate_label_file(label_path: Path, names: dict[int, str]) -> tuple[int, list[str], set[str]]:
+    """校验单个标签文件，返回 (目标实例数, 错误信息列表, 该文件出现的标签格式集合)。
+
+    支持两种 YOLO 标签：
+    - 目标检测：`class_id cx cy w h`（4 个坐标）
+    - 实例分割：`class_id x1 y1 x2 y2 ...`（≥ 3 个点，坐标数为偶数）
+    空文件允许（背景图）。
+    """
     errors: list[str] = []
+    formats: set[str] = set()
     try:
         text = label_path.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
-        return 0, [f"无法读取标签文件: {e}"]
+        return 0, [f"无法读取标签文件: {e}"], formats
     count = 0
     for lineno, line in enumerate(text.splitlines(), start=1):
         line = line.strip()
@@ -268,16 +279,6 @@ def _validate_label_file(label_path: Path, names: dict[int, str]) -> tuple[int, 
             errors.append(f"{label_path.name}:{lineno} 类别 ID {cls} 不在 names 中")
             continue
         coords = tokens[1:]
-        if len(coords) < 6:
-            kind = "检测框标签" if len(coords) == 4 else "坐标点数量"
-            errors.append(
-                f"{label_path.name}:{lineno} 分割多边形至少需要 3 个点（6 个坐标），"
-                f"当前 {len(coords)} 个坐标（疑似{kind}格式，不被支持）"
-            )
-            continue
-        if len(coords) % 2 != 0:
-            errors.append(f"{label_path.name}:{lineno} 坐标数量 {len(coords)} 不是偶数，无法组成点对")
-            continue
         try:
             vals = [float(v) for v in coords]
         except ValueError:
@@ -289,17 +290,39 @@ def _validate_label_file(label_path: Path, names: dict[int, str]) -> tuple[int, 
         if any(v < -1e-6 or v > 1 + 1e-6 for v in vals):
             errors.append(f"{label_path.name}:{lineno} 坐标超出 0~1 归一化范围")
             continue
+
+        n = len(vals)
+        if n == 4:  # 目标检测框
+            if vals[2] <= 0 or vals[3] <= 0:
+                errors.append(f"{label_path.name}:{lineno} 检测框宽/高必须大于 0（当前 w={vals[2]}, h={vals[3]}）")
+                continue
+            formats.add(LABEL_FORMAT_BOX)
+        elif n >= 6 and n % 2 == 0:  # 分割多边形
+            formats.add(LABEL_FORMAT_POLYGON)
+        elif n >= 6:
+            errors.append(f"{label_path.name}:{lineno} 坐标数量 {n} 不是偶数，无法组成点对")
+            continue
+        else:
+            errors.append(
+                f"{label_path.name}:{lineno} 标签坐标数量为 {n}，既不是检测框（4 个坐标）"
+                "也不是分割多边形（≥ 6 个且为偶数）"
+            )
+            continue
         count += 1
-    return count, errors
+    return count, errors, formats
 
 
 def _validate_split(
     root: Path, images: list[Path], names: dict[int, str], split: str
 ) -> tuple[dict, list[str], list[str]]:
     """校验一个 split 的所有标签，返回 (统计, 错误, 警告)。"""
-    stats = {"images": len(images), "label_files": 0, "instances": 0, "background_images": 0}
+    stats = {
+        "images": len(images), "label_files": 0, "instances": 0, "background_images": 0,
+        "box_instances": 0, "polygon_instances": 0, "formats": [],
+    }
     errors: list[str] = []
     warnings: list[str] = []
+    formats: set[str] = set()
     error_total = 0
     for img in images:
         label_path = _img_to_label_path(img, root)
@@ -307,18 +330,24 @@ def _validate_split(
             stats["background_images"] += 1  # 允许背景图没有标签
             continue
         stats["label_files"] += 1
-        n_inst, errs = _validate_label_file(label_path, names)
+        n_inst, errs, file_formats = _validate_label_file(label_path, names)
         stats["instances"] += n_inst
+        formats |= file_formats
+        if LABEL_FORMAT_BOX in file_formats:
+            stats["box_instances"] += n_inst if file_formats == {LABEL_FORMAT_BOX} else 0
+        if LABEL_FORMAT_POLYGON in file_formats:
+            stats["polygon_instances"] += n_inst if file_formats == {LABEL_FORMAT_POLYGON} else 0
         if errs:
             error_total += len(errs)
             if len(errors) < MAX_ERROR_SAMPLES:
                 errors.extend(errs[: MAX_ERROR_SAMPLES - len(errors)])
+    stats["formats"] = sorted(formats)
     if error_total > len(errors):
         errors.append(f"... 共发现 {error_total} 处标签格式错误，仅展示前 {len(errors) - 1} 条")
     if stats["images"] > 0 and stats["label_files"] == 0:
         errors.append(
             f"{split} 的 {stats['images']} 张图片均未找到对应标签（应位于 labels/ 目录），"
-            "请检查目录结构是否符合 YOLO-Seg 格式"
+            "请检查目录结构是否符合 YOLO 格式"
         )
     if stats["instances"] == 0 and stats["label_files"] > 0:
         warnings.append(f"{split} 中所有标签文件都为空（全部为背景图）")
@@ -399,6 +428,23 @@ def import_dataset_zip(zip_path: str | Path, name: str | None = None) -> dict:
             detail = "\n".join(f"- {e}" for e in all_errors)
             raise DatasetError(f"标签校验失败，共 {len(all_errors)} 处问题：\n{detail}")
 
+        # 依据标签格式判定数据集任务类型：4 坐标 → detect，多边形 → segment
+        formats: set[str] = set()
+        for stats in split_stats.values():
+            formats |= set(stats.get("formats", []))
+        if formats == {LABEL_FORMAT_POLYGON}:
+            dataset_task = "segment"
+        elif formats == {LABEL_FORMAT_BOX}:
+            dataset_task = "detect"
+        elif not formats:
+            dataset_task = "detect"
+            all_warnings.append("数据集中没有任何已标注实例，无法从标签判断任务类型，已按 detect（目标检测）处理")
+        else:
+            raise DatasetError(
+                "同一数据集混用了检测框标签（4 个坐标）与分割标签（≥6 个坐标），"
+                "请统一标签格式后重新导入"
+            )
+
         # 校验通过：落盘
         if final_dir.exists():
             shutil.rmtree(final_dir)
@@ -409,6 +455,7 @@ def import_dataset_zip(zip_path: str | Path, name: str | None = None) -> dict:
             "id": dataset_id,
             "name": (name or zip_path.stem).strip() or zip_path.stem,
             "created_at": config.now_iso(),
+            "task": dataset_task,
             "nc": len(names),
             "names": {str(k): v for k, v in names.items()},
             "train_images": split_stats["train"]["images"],
@@ -480,7 +527,7 @@ PALETTE = [
 
 
 def _draw_overlay(img: Image.Image, label_path: Path, names: dict[int, str]) -> Image.Image:
-    """在图片上绘制分割多边形（Pillow 实现，非标注编辑器）。"""
+    """在图片上绘制标签：检测框画矩形，分割标签画多边形（Pillow 实现，非标注编辑器）。"""
     base = img.convert("RGBA")
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -491,21 +538,30 @@ def _draw_overlay(img: Image.Image, label_path: Path, names: dict[int, str]) -> 
         return img
     for line in lines:
         tokens = line.split()
-        if len(tokens) < 7:
+        if len(tokens) < 5:
             continue
         try:
             cls = int(tokens[0])
             vals = [float(v) for v in tokens[1:]]
         except ValueError:
             continue
-        pts = [(vals[i] * w, vals[i + 1] * h) for i in range(0, len(vals) - 1, 2)]
-        if len(pts) < 3:
-            continue
         color = PALETTE[cls % len(PALETTE)]
-        draw.polygon(pts, outline=color + (255,), fill=color + (60,))
-        draw.line(pts + [pts[0]], fill=color + (255,), width=3)
         label = names.get(cls, str(cls))
-        tx, ty = pts[0]
+        if len(vals) == 4:  # 检测框：cx cy w h
+            cx, cy, bw, bh = vals
+            x1, y1 = (cx - bw / 2) * w, (cy - bh / 2) * h
+            x2, y2 = (cx + bw / 2) * w, (cy + bh / 2) * h
+            draw.rectangle([x1, y1, x2, y2], outline=color + (255,), fill=color + (40,), width=3)
+            tx, ty = x1, max(0, y1 - 15)
+        elif len(vals) >= 6 and len(vals) % 2 == 0:  # 分割多边形
+            pts = [(vals[i] * w, vals[i + 1] * h) for i in range(0, len(vals) - 1, 2)]
+            if len(pts) < 3:
+                continue
+            draw.polygon(pts, outline=color + (255,), fill=color + (60,))
+            draw.line(pts + [pts[0]], fill=color + (255,), width=3)
+            tx, ty = pts[0]
+        else:
+            continue
         tw = draw.textlength(label)
         draw.rectangle([tx, ty, tx + tw + 6, ty + 14], fill=color + (200,))
         draw.text((tx + 3, ty + 1), label, fill=(255, 255, 255, 255))
@@ -559,6 +615,7 @@ def dataset_table_rows(datasets: list[dict]) -> list[list]:
     for m in datasets:
         rows.append([
             m["name"],
+            m.get("task", "segment"),
             m["id"],
             m["nc"],
             ", ".join(list(m["names"].values())[:8]) + ("..." if m["nc"] > 8 else ""),
@@ -570,7 +627,9 @@ def dataset_table_rows(datasets: list[dict]) -> list[list]:
     return rows
 
 
-DATASET_TABLE_HEADERS = ["名称", "数据集 ID", "类别数", "类别列表", "训练图片", "验证图片", "状态", "导入时间"]
+DATASET_TABLE_HEADERS = [
+    "名称", "任务", "数据集 ID", "类别数", "类别列表", "训练图片", "验证图片", "状态", "导入时间",
+]
 
 
 def dataset_info_markdown(meta: dict) -> str:
@@ -578,16 +637,26 @@ def dataset_info_markdown(meta: dict) -> str:
         return "未选择数据集。"
     splits = meta.get("splits", {})
     train, val = splits.get("train", {}), splits.get("val", {})
+
+    def _split_detail(stats: dict) -> str:
+        formats = stats.get("formats", [])
+        fmt_txt = "、".join(
+            {"box": "检测框标签", "polygon": "分割标签"}.get(f, f) for f in formats
+        ) or "无标签"
+        return (
+            f"{stats.get('instances', 0)} 个实例（{fmt_txt}，"
+            f"{stats.get('label_files', 0)} 个标签文件 / {stats.get('background_images', 0)} 张背景图）"
+        )
+
     lines = [
         f"### 数据集：{meta['name']}",
         "",
         f"- **数据集 ID**：`{meta['id']}`",
+        f"- **任务类型**：{config.task_label(meta.get('task'))}",
         f"- **类别数 (nc)**：{meta['nc']}",
         f"- **类别列表**：{', '.join(f'{k}:{v}' for k, v in meta['names'].items())}",
-        f"- **训练集**：{meta['train_images']} 张图片 / {train.get('label_files', 0)} 个标签文件 / "
-        f"{train.get('instances', 0)} 个实例",
-        f"- **验证集**：{meta['val_images']} 张图片 / {val.get('label_files', 0)} 个标签文件 / "
-        f"{val.get('instances', 0)} 个实例",
+        f"- **训练集**：{meta['train_images']} 张图片，{_split_detail(train)}",
+        f"- **验证集**：{meta['val_images']} 张图片，{_split_detail(val)}",
         f"- **状态**：{meta.get('status', '有效')}",
         f"- **导入时间**：{meta['created_at']}",
         f"- **来源**：{meta.get('source_zip', '-')} ({meta.get('zip_size_mb', 0)} MB)",

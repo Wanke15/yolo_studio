@@ -105,3 +105,27 @@ def test_inference_on_trained_style_dataset_image(tmp_path, tiny_seg_pt):
     result = inference.run_inference(meta["id"], img, conf=0.1, imgsz=320, device="cpu")
     assert Path(result["result_path"]).is_file()
     assert zipfile.is_zipfile(tiny_seg_pt)
+
+
+# ---------------------------------------------------------------- 目标检测模型推理
+def test_detect_model_inference(tmp_path, tiny_detect_pt):
+    """detect 模型也能推理：结果结构一致，统计按检测框实例数。"""
+    meta = models.import_model_file(tiny_detect_pt, name="检测推理模型")
+    assert meta["task"] == "detect"
+    img_path = _image(tmp_path)
+    result = inference.run_inference(meta["id"], img_path, conf=0.25, imgsz=320, device="cpu")
+    assert result["task"] == "detect"
+    assert result["total"] == sum(result["counts"].values())
+    assert Path(result["result_path"]).is_file()
+    md = inference.stats_markdown(result)
+    assert "detect（目标检测）" in md and "检测到的实例总数" in md
+
+
+def test_reject_unsupported_task_model(tmp_path, tiny_seg_pt):
+    """非 segment/detect 的模型（如 classify）不参与推理。"""
+    meta = _upload_model(tiny_seg_pt)
+    # 手工把 meta 改成不支持的任务类型，模拟历史数据/异常状态
+    bad = dict(meta, task="classify")
+    config.atomic_write_json(config.MODELS_DIR / meta["id"] / "meta.json", bad)
+    with pytest.raises(inference.InferenceError, match="只支持"):
+        inference.run_inference(meta["id"], _image(tmp_path), device="cpu")

@@ -1,6 +1,7 @@
-"""在线推理：单张图片分割推理、结果可视化与统计。
+"""在线推理：单张图片分割/检测推理、结果可视化与统计。
 
 直接调用 Ultralytics predict API，不做批量/视频/摄像头推理。
+两类模型均使用 results[0].plot() 可视化，按实例数量统计。
 """
 from __future__ import annotations
 
@@ -32,8 +33,11 @@ def run_inference(
     meta = models.get_model(model_id)
     if not meta:
         raise InferenceError("请选择有效的模型")
-    if meta.get("task") != "segment":
-        raise InferenceError(f"模型「{meta['name']}」不是 segment 模型，无法用于分割推理")
+    if meta.get("task") not in config.SUPPORTED_TASKS:
+        raise InferenceError(
+            f"模型「{meta['name']}」的任务类型为 {meta.get('task')}，"
+            "本平台只支持 segment（实例分割）与 detect（目标检测）模型"
+        )
 
     image_path = Path(image_path)
     if not image_path.is_file() or image_path.suffix.lower() not in config.IMAGE_EXTS:
@@ -95,6 +99,7 @@ def run_inference(
         "total": total,
         "result_path": str(result_path),
         "model_name": meta["name"],
+        "task": meta.get("task"),
         "device": device,
         "conf": conf,
         "imgsz": imgsz,
@@ -107,7 +112,7 @@ def stats_markdown(result: dict) -> str:
     lines = [
         f"### 推理结果",
         "",
-        f"- **模型**：{result['model_name']}",
+        f"- **模型**：{result['model_name']}（{config.task_label(result.get('task'))}）",
         f"- **设备**：{result['device']} ｜ Conf：{result['conf']} ｜ imgsz：{result['imgsz']}",
         f"- **检测到的实例总数**：**{result['total']}**",
     ]

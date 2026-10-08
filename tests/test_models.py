@@ -59,10 +59,27 @@ def test_register_run_best_missing_file():
 
 
 # ---------------------------------------------------------------- 异常输入
-def test_reject_detect_model(tiny_detect_pt):
-    with pytest.raises(models.ModelError, match="segment"):
-        models.import_model_file(tiny_detect_pt, name="检测模型")
+def test_upload_detect_model_ok(tiny_detect_pt):
+    """目标检测模型现在是被支持的。"""
+    meta = models.import_model_file(tiny_detect_pt, name="检测模型")
+    assert meta["task"] == "detect"
+    assert models.model_path(meta["id"]).is_file()
+    assert models.list_models(task="detect")[0]["id"] == meta["id"]
+    assert models.list_models(task="segment") == []
+
+
+def test_reject_classify_model(tiny_cls_pt):
+    with pytest.raises(models.ModelError, match="classify"):
+        models.import_model_file(tiny_cls_pt, name="分类模型")
     assert models.list_models() == []
+
+
+def test_list_models_returns_all_tasks(tiny_seg_pt, tiny_detect_pt):
+    seg = models.import_model_file(tiny_seg_pt, name="分割模型")
+    det = models.import_model_file(tiny_detect_pt, name="检测模型")
+    ids = {m["id"] for m in models.list_models()}
+    assert ids == {seg["id"], det["id"]}
+    assert len(models.model_choices(models.list_models())) == 2
 
 
 def test_reject_wrong_extension(tmp_path):

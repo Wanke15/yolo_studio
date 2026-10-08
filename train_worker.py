@@ -63,11 +63,15 @@ def main() -> int:
         from ultralytics import YOLO
 
         model = YOLO(task["model"]["path"])
-        if getattr(model, "task", None) != "segment":
+        model_task = getattr(model, "task", None)
+        if model_task not in ("segment", "detect"):
             raise RuntimeError(
-                f"权重任务类型为 {getattr(model, 'task', None)}，V1 仅支持 segment 分割模型"
+                f"权重任务类型为 {model_task}，本平台只支持 segment（实例分割）与 detect（目标检测）"
             )
+        if model_task == "segment" and (task["dataset"].get("task") or "segment") != "segment":
+            raise RuntimeError("segment 模型需要多边形标签，当前数据集为检测框标签")
         # 训练核心：直接使用 Ultralytics 官方 API，参数全部来自任务配置
+        # （detect 模型配分割数据集时，Ultralytics 会自动把多边形转换为外接框）
         model.train(
             data=task["dataset"]["yaml_path"],
             epochs=cfg["epochs"],

@@ -237,8 +237,22 @@ def start_training(
         model_meta = models.get_model(model_id)
         if not model_meta:
             raise TrainingError("请选择有效的模型")
-        if model_meta.get("task") != "segment":
-            raise TrainingError("V1 仅支持 segment 分割模型训练")
+
+        model_task = model_meta.get("task")
+        if model_task not in config.SUPPORTED_TASKS:
+            raise TrainingError(f"不支持的模型任务类型：{model_task}")
+        dataset_task = dataset_meta.get("task", "segment")
+        notes: list[str] = []
+        if model_task == "segment" and dataset_task != "segment":
+            raise TrainingError(
+                "segment（实例分割）模型需要多边形标签，当前数据集是检测框标签。"
+                "请改选 detect 模型，或导入带分割标签的数据集。"
+            )
+        if model_task == "detect" and dataset_task == "segment":
+            # Ultralytics 原生行为：检测训练会把多边形标签转换为外接框，仅提示不阻塞
+            notes.append(
+                "检测模型 + 分割数据集：训练时 Ultralytics 会把多边形标签自动转换为外接框（框精度为 Box mAP）"
+            )
 
         cfg = validate_config(epochs, batch, imgsz, workers)
         cfg["device"] = _validate_device(device or "")
@@ -250,17 +264,20 @@ def start_training(
         task = {
             "run_id": run_id,
             "name": (name or "").strip() or default_name,
+            "task": model_task,
             "status": config.RUN_STATUS_RUNNING,
             "pid": None,
             "started_at": config.now_iso(),
             "finished_at": None,
             "exit_code": None,
-            "message": "",
+            "message": "；".join(notes),
+            "notes": notes,
             "config": cfg,
             # 数据集/模型元信息快照：即使之后被删除，历史记录仍然完整
             "dataset": {
                 "id": dataset_meta["id"],
                 "name": dataset_meta["name"],
+                "task": dataset_task,
                 "nc": dataset_meta["nc"],
                 "train_images": dataset_meta["train_images"],
                 "val_images": dataset_meta["val_images"],
@@ -269,7 +286,7 @@ def start_training(
             "model": {
                 "id": model_meta["id"],
                 "name": model_meta["name"],
-                "task": model_meta["task"],
+                "task": model_task,
                 "path": str(weight_path),
                 "size_mb": model_meta.get("size_mb"),
             },
@@ -485,14 +502,51 @@ def read_log(run_id: str, max_lines: int = 200) -> str:
 
 # ================================================================ 指标
 # 不同 Ultralytics 版本的列名可能不同，这里做兼容映射；找不到的指标保持缺失，不填 0
-METRIC_ALIASES = {
+LOSS_ALIASES = {
     "train_box_loss": ["train/box_loss", "train_box_loss"],
     "train_seg_loss": ["train/seg_loss", "train_seg_loss"],
     "val_box_loss": ["val/box_loss", "val_box_loss"],
     "val_seg_loss": ["val/seg_loss", "val_seg_loss"],
-    "mask_map50": ["metrics/mAP50(M)", "metrics/mAP50_mask", "metrics/mAP50(Mask)"],
-    "mask_map50_95": ["metrics/mAP50-95(M)", "metrics/mAP50-95_mask", "metrics/mAP50-95(Mask)"],
 }
+# 精度指标使用通用键 map50 / map50_95，按任务类型选择实际列名：
+#   segment → metrics/mAP50(M)（掩码 mAP）；detect → metrics/mAP50(B)（检测框 mAP）
+TASK_METRIC_ALIASES = {
+    "segment": {
+        "map50": ["metrics/mAP50(M)", "metrics/mAP50_mask", "metrics/mAP50(Mask)"],
+        "map50_95": ["metrics/mAP50-95(M)", "metrics/mAP50-95_mask", "metrics/mAP50-95(Mask)"],
+    },
+    "detect": {
+        "map50": ["metrics/mAP50(B)", "metrics/mAP50_box", "metrics/mAP50(Box)"],
+        "map50_95": ["metrics/mAP50-95(B)", "metrics/mAP50-95_box", "metrics/mAP50-95(Box)"],
+    },
+}
+LOSS_LABELS = {
+    "train_box_loss": "Train Box Loss",
+    "train_seg_loss": "Train Seg Loss",
+    "val_box_loss": "Val Box Loss",
+    "val_seg_loss": "Val Seg Loss",
+}
+TASK_METRIC_LABELS = {
+    "segment": {"map50": "Mask mAP50", "map50_95": "Mask mAP50-95"},
+    "detect": {"map50": "Box mAP50", "map50_95": "Box mAP50-95"},
+}
+
+
+def run_task(task: dict | None, default: str = "segment") -> str:
+    """读取任务的任务类型（兼容早期没有 task 字段的历史记录）。"""
+    if not task:
+        return default
+    return task.get("task") or (task.get("model") or {}).get("task") or default
+
+
+def metric_aliases(task: str) -> dict[str, list[str]]:
+    """任务类型对应的指标键 → 可能的 CSV 列名。"""
+    return {**LOSS_ALIASES, **TASK_METRIC_ALIASES.get(task, TASK_METRIC_ALIASES["segment"])}
+
+
+def metric_labels(task: str) -> dict[str, str]:
+    """任务类型对应的指标键 → 展示名称。"""
+    return {**LOSS_LABELS, **TASK_METRIC_LABELS.get(task, TASK_METRIC_LABELS["segment"])}
 
 
 def _norm(name: str) -> str:
@@ -500,17 +554,9 @@ def _norm(name: str) -> str:
     import re
 
     return re.sub(r"[^a-z0-9]", "", name.lower())
-METRIC_LABELS = {
-    "train_box_loss": "Train Box Loss",
-    "train_seg_loss": "Train Seg Loss",
-    "val_box_loss": "Val Box Loss",
-    "val_seg_loss": "Val Seg Loss",
-    "mask_map50": "Mask mAP50",
-    "mask_map50_95": "Mask mAP50-95",
-}
 
 
-def _resolve_columns(fieldnames: list[str]) -> dict[str, str]:
+def _resolve_columns(fieldnames: list[str], aliases: dict[str, list[str]]) -> dict[str, str]:
     """把实际 CSV 列名映射到标准指标键。
 
     先按别名精确匹配，再退化为“忽略标点/大小写”的等价匹配。
@@ -519,13 +565,13 @@ def _resolve_columns(fieldnames: list[str]) -> dict[str, str]:
     normalized = {name.strip(): name for name in fieldnames if name}
     by_normalized = {_norm(name): name for name in normalized}
     mapping: dict[str, str] = {}
-    for key, aliases in METRIC_ALIASES.items():
-        for alias in aliases:
+    for key, key_aliases in aliases.items():
+        for alias in key_aliases:
             if alias in normalized:
                 mapping[key] = normalized[alias]
                 break
         else:
-            for alias in aliases:
+            for alias in key_aliases:
                 hit = by_normalized.get(_norm(alias))
                 if hit:
                     mapping[key] = hit
@@ -533,13 +579,18 @@ def _resolve_columns(fieldnames: list[str]) -> dict[str, str]:
     return mapping
 
 
-def read_metrics(run_id: str) -> dict | None:
-    """读取 results.csv，返回 {'epochs': [...], 'series': {key: [...]}, 'best': {...}}。
+def read_metrics(run_id: str, task: str | None = None) -> dict | None:
+    """读取 results.csv，返回 {'epochs', 'series', 'best', 'labels', 'task', ...}。
 
+    精度指标键为通用的 map50 / map50_95：segment 取掩码列，detect 取检测框列。
     CSV 不存在或没有任何可用指标时返回 None（UI 显示等待状态）。
     """
-    task = get_run(run_id)
-    csv_path = Path(task["results_csv"]) if task and task.get("results_csv") else None
+    run = get_run(run_id)
+    task = task or run_task(run)
+    aliases = metric_aliases(task)
+    labels = metric_labels(task)
+
+    csv_path = Path(run["results_csv"]) if run and run.get("results_csv") else None
     if not csv_path or not csv_path.is_file():
         found = _find_output_dir(run_id)
         csv_path = found / "results.csv" if found else None
@@ -564,12 +615,12 @@ def read_metrics(run_id: str) -> dict | None:
 
     if not rows:
         return None
-    mapping = _resolve_columns(fieldnames)
-    series: dict[str, list] = {key: [] for key in METRIC_ALIASES}
+    mapping = _resolve_columns(fieldnames, aliases)
+    series: dict[str, list] = {key: [] for key in aliases}
     epochs: list[int] = []
     for epoch, raw in rows:
         epochs.append(epoch)
-        for key in METRIC_ALIASES:
+        for key in aliases:
             value = None
             col = mapping.get(key)
             if col:
@@ -580,20 +631,23 @@ def read_metrics(run_id: str) -> dict | None:
             series[key].append(value)
 
     best: dict[str, dict] = {}
-    for key in ("mask_map50", "mask_map50_95"):
-        values = series[key]
-        pairs = [(e, v) for e, v in zip(epochs, values) if v is not None]
+    for key in ("map50", "map50_95"):
+        if key not in series:
+            continue
+        pairs = [(e, v) for e, v in zip(epochs, series[key]) if v is not None]
         if pairs:
             e, v = max(pairs, key=lambda p: p[1])
             best[key] = {"epoch": e, "value": v}
 
-    if not any(v is not None for key, vals in series.items() for v in vals):
+    if not any(v is not None for vals in series.values() for v in vals):
         return None
     return {
         "epochs": epochs,
         "series": series,
         "best": best,
         "mapping": mapping,
+        "labels": labels,
+        "task": task,
         "columns": [c for c in fieldnames if c],
         "total_epochs_seen": max(epochs) + 1,
     }
@@ -606,8 +660,9 @@ def metrics_long_dataframe(run_id: str):
         return None
     import pandas as pd
 
+    labels = metrics["labels"]
     rows = []
-    for key, label in METRIC_LABELS.items():
+    for key, label in labels.items():
         for epoch, value in zip(metrics["epochs"], metrics["series"][key]):
             if value is not None:  # 缺失指标不画点，也不伪造为 0
                 rows.append({"epoch": epoch, "指标": label, "数值": value})
@@ -641,7 +696,9 @@ def status_markdown(task: dict | None = None) -> str:
             + (f" ｜ **结束时间**：{task['finished_at']}" if task.get("finished_at") else ""),
             f"- **已运行时间**：{elapsed}",
             f"- **已完成 Epoch / 总 Epoch**：{done if done is not None else '等待中'} / {total_epochs}",
-            f"- **数据集**：{task['dataset']['name']} ｜ **基础模型**：{task['model']['name']}",
+            f"- **任务类型**：{config.task_label(run_task(task))}",
+            f"- **数据集**：{task['dataset']['name']}（{config.task_label((task['dataset'] or {}).get('task'))}）"
+            f" ｜ **基础模型**：{task['model']['name']}",
             f"- **设备**：{cfg.get('device')} ｜ batch={cfg.get('batch')} ｜ imgsz={cfg.get('imgsz')} ｜ "
             f"workers={cfg.get('workers')} ｜ PID={task.get('pid')}",
         ]
@@ -706,10 +763,12 @@ def result_markdown(run_id: str) -> str:
         return "任务不存在。"
     metrics = read_metrics(run_id) or {}
     best = task.get("best") or metrics.get("best") or {}
+    labels = metric_labels(run_task(task))
     lines = [f"### 训练结果：{task['name']}", ""]
     if task["status"] != config.RUN_STATUS_COMPLETED:
         lines.append(f"任务状态为 {_status_badge(task['status'])}，以下为当前可用的产物（如有）。")
-    for key, label in (("mask_map50", "最优 Mask mAP50"), ("mask_map50_95", "最优 Mask mAP50-95")):
+    for key in ("map50", "map50_95"):
+        label = f"最优 {labels[key]}"
         if key in best:
             lines.append(f"- **{label}**：{best[key]['value']:.4f}（epoch {best[key]['epoch']}）")
         else:
@@ -738,19 +797,22 @@ def result_markdown(run_id: str) -> str:
     return "\n".join(lines)
 
 
-RUN_HISTORY_HEADERS = ["任务 ID", "训练名称", "数据集", "基础模型", "Epochs", "状态", "开始时间", "Mask mAP50-95"]
+RUN_HISTORY_HEADERS = [
+    "任务 ID", "训练名称", "任务", "数据集", "基础模型", "Epochs", "状态", "开始时间", "mAP50-95",
+]
 
 
 def run_history_rows(runs: list[dict] | None = None) -> list[list]:
     rows = []
     for t in runs if runs is not None else list_runs():
-        best = (t.get("best") or {}).get("mask_map50_95")
+        best = (t.get("best") or {}).get("map50_95")
         if best is None:
             metrics = read_metrics(t["run_id"]) or {}
-            best = (metrics.get("best") or {}).get("mask_map50_95")
+            best = (metrics.get("best") or {}).get("map50_95")
         rows.append([
             t["run_id"],
             t["name"],
+            run_task(t),
             (t.get("dataset") or {}).get("name", "-"),
             (t.get("model") or {}).get("name", "-"),
             (t.get("config") or {}).get("epochs", "-"),
@@ -763,7 +825,7 @@ def run_history_rows(runs: list[dict] | None = None) -> list[list]:
 
 def run_choices(runs: list[dict] | None = None) -> list[tuple[str, str]]:
     return [
-        (f"{t['name']} | {t['run_id']} | {t['status']}", t["run_id"])
+        (f"{t['name']} | {t['run_id']} | {run_task(t)} | {t['status']}", t["run_id"])
         for t in (runs if runs is not None else list_runs())
     ]
 
@@ -783,9 +845,10 @@ def run_config_markdown(run_id: str) -> str:
         "",
         "| 参数 | 值 |",
         "|---|---|",
-        f"| 数据集 | {ds.get('name', '-')} (`{ds.get('id', '-')}`) |",
+        f"| 任务类型 | {config.task_label(run_task(task))} |",
+        f"| 数据集 | {ds.get('name', '-')} (`{ds.get('id', '-')}`) ｜ {config.task_label(ds.get('task'))} |",
         f"| 数据集类别数 | {ds.get('nc', '-')} ｜ 训练/验证图片 {ds.get('train_images', '-')}/{ds.get('val_images', '-')} |",
-        f"| 基础模型 | {md.get('name', '-')} (`{md.get('id', '-')}`) |",
+        f"| 基础模型 | {md.get('name', '-')} (`{md.get('id', '-')}`) ｜ {config.task_label(md.get('task'))} |",
         f"| Epochs | {cfg.get('epochs', '-')} |",
         f"| Batch Size | {cfg.get('batch', '-')} |",
         f"| Image Size | {cfg.get('imgsz', '-')} |",

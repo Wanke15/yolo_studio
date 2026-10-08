@@ -25,15 +25,16 @@ config.ensure_dirs()
 # ================================================================ 通用工具
 def _dataset_choices() -> list[tuple[str, str]]:
     return [
-        (f"{m['name']} | {m['id']} | 类别 {m['nc']} | 训练/验证 {m['train_images']}/{m['val_images']}", m["id"])
+        (f"{m['name']} | {m.get('task', 'segment')} | 类别 {m['nc']} | "
+         f"训练/验证 {m['train_images']}/{m['val_images']}", m["id"])
         for m in datasets.list_datasets()
     ]
 
 
 def _model_choices() -> list[tuple[str, str]]:
     return [
-        (f"{m['name']} | {m['id']} | {m.get('size_mb', '?')}MB | {m['source']}", m["id"])
-        for m in models.list_models(task="segment")
+        (f"{m['name']} | {m['task']} | {m.get('size_mb', '?')}MB | {m['source']}", m["id"])
+        for m in models.list_models()
     ]
 
 
@@ -141,7 +142,7 @@ def ui_model_info(model_id):
         f"### 模型：{meta['name']}",
         "",
         f"- **模型 ID**：`{meta['id']}`",
-        f"- **任务类型**：{meta['task']}（V1 仅支持 segment 分割）",
+        f"- **任务类型**：{config.task_label(meta.get('task'))}",
         f"- **类别数**：{meta.get('nc', '-')}",
         f"- **类别列表**：{', '.join(names) if names else '-'}",
         f"- **文件大小**：{meta.get('size_mb', '-')} MB",
@@ -210,6 +211,8 @@ def ui_start_training(dataset_id, model_id, epochs, batch, imgsz, device, worker
     msg = f"✅ 训练任务已启动：`{task['run_id']}`（{task['name']}），PID={task['pid']}。"
     if task["config"]["device"] == "cpu":
         msg += " 当前使用 CPU 训练，速度较慢，请耐心等待。"
+    for note in task.get("notes") or []:
+        msg += "\n\n> 提示：" + note
     return (
         msg, training.status_markdown(task), "", None, training.result_markdown(task["run_id"]),
         gr.Dataframe(value=training.run_history_rows()), gr.Dropdown(choices=training.run_choices(), value=task["run_id"]),
@@ -355,7 +358,7 @@ with gr.Blocks(title="YOLO Studio Lite", theme=gr.themes.Soft(), css=CSS) as dem
     gr.Markdown(
         """
 # YOLO Studio Lite
-轻量级 YOLO **实例分割（segment）** 管理平台：数据集导入 → 模型管理 → 训练与监控 → 在线推理。全部数据保存在服务器本地 `storage/` 目录。
+轻量级 YOLO **实例分割（segment）/ 目标检测（detect）** 管理平台：数据集导入 → 模型管理 → 训练与监控 → 在线推理。全部数据保存在服务器本地 `storage/` 目录。
         """
     )
 
@@ -364,7 +367,7 @@ with gr.Blocks(title="YOLO Studio Lite", theme=gr.themes.Soft(), css=CSS) as dem
         with gr.Tab("① 数据集管理"):
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown("### 导入数据集（YOLO-Seg 格式 ZIP）")
+                    gr.Markdown("### 导入数据集（YOLO 格式 ZIP：分割 / 检测）")
                     ds_zip = gr.File(label="数据集 ZIP", file_types=[".zip"], type="filepath")
                     ds_name = gr.Textbox(label="数据集名称", placeholder="留空则使用 ZIP 文件名")
                     ds_import_btn = gr.Button("导入数据集", variant="primary")
@@ -380,8 +383,10 @@ dataset.zip
 ```
 - 允许 ZIP 内额外包一层数据集根目录
 - 图片支持 jpg / jpeg / png
-- 标签格式：`class_id x1 y1 x2 y2 ...`（多边形 ≥ 3 个点，坐标 0~1）
-- 不接受检测框标签，背景图可无标签文件
+- 分割标签：`class_id x1 y1 x2 y2 ...`（多边形 ≥ 3 个点，坐标 0~1）
+- 检测标签：`class_id cx cy w h`（中心点 + 宽高，均为 0~1）
+- 任务类型按标签格式自动识别；同一数据集混用两种格式会被拒绝
+- 背景图可无标签文件
                         """
                     )
                 with gr.Column(scale=2):
@@ -416,7 +421,7 @@ dataset.zip
                     gr.Markdown(
                         """
 **说明**
-- V1 仅接受 Ultralytics **segment** 模型；detect / classify / pose 模型会被拒绝
+- 接受 Ultralytics **segment（实例分割）** 与 **detect（目标检测）** 模型；classify / pose 模型会被拒绝
 - 训练完成后产生的 `best.pt` 会自动出现在下方列表
 - 平台不会联网下载预训练权重，请上传本地 `.pt` 文件
 - ⚠️ `.pt` 反序列化存在安全风险，仅允许上传受信任的权重文件
@@ -446,7 +451,7 @@ dataset.zip
                 with gr.Column(scale=1):
                     gr.Markdown("### 训练配置")
                     train_dataset = gr.Dropdown(label="数据集", choices=[], interactive=True, allow_custom_value=True)
-                    train_model = gr.Dropdown(label="模型（segment）", choices=[], interactive=True, allow_custom_value=True)
+                    train_model = gr.Dropdown(label="模型（segment / detect）", choices=[], interactive=True, allow_custom_value=True)
                     with gr.Row():
                         train_epochs = gr.Number(value=50, precision=0, label="Epochs")
                         train_batch = gr.Number(value=8, precision=0, label="Batch Size")
@@ -467,6 +472,8 @@ dataset.zip
 - 单任务模式：同一时间只允许一个训练任务
 - 训练在独立子进程中执行，可随时在页面查看日志与指标
 - 停止训练只会终止本次任务所属的进程组
+- 任务组合：segment 模型 ↔ 分割数据集；detect 模型 ↔ 检测数据集；
+  detect 模型 + 分割数据集会把多边形自动转成外接框（框精度看 Box mAP）
                         """
                     )
                 with gr.Column(scale=2):
@@ -515,7 +522,7 @@ dataset.zip
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("### 推理配置")
-                    infer_model = gr.Dropdown(label="模型（segment）", choices=[], interactive=True, allow_custom_value=True)
+                    infer_model = gr.Dropdown(label="模型（segment / detect）", choices=[], interactive=True, allow_custom_value=True)
                     infer_image = gr.Image(label="上传图片（jpg / jpeg / png）", type="filepath", height=260)
                     infer_conf = gr.Slider(0.05, 0.95, value=0.25, step=0.05, label="Conf Threshold")
                     infer_imgsz = gr.Dropdown(
@@ -527,7 +534,7 @@ dataset.zip
                     gr.Markdown(
                         """
 **说明**
-- 单张图片推理，使用 `results[0].plot()` 生成可视化结果
+- 单张图片推理（分割 / 检测均可），使用 `results[0].plot()` 生成可视化结果
 - GPU 训练进行中时禁用 GPU 推理，避免显存冲突
 - 未检测到目标属于正常结果，不是执行失败
                         """

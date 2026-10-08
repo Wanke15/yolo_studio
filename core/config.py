@@ -47,6 +47,22 @@ EPOCHS_RANGE = (1, 10000)
 BATCH_RANGE = (1, 1024)
 WORKERS_RANGE = (0, 32)
 
+# 支持的任务类型（V1.1 起：实例分割 + 目标检测）
+SUPPORTED_TASKS = ("segment", "detect")
+TASK_LABELS = {
+    "segment": "segment（实例分割）",
+    "detect": "detect（目标检测）",
+    "classify": "classify（图像分类）",
+    "pose": "pose（姿态估计）",
+    "obb": "obb（旋转框检测）",
+}
+
+
+def task_label(task: str | None) -> str:
+    """任务类型的中文可读名称。"""
+    return TASK_LABELS.get(str(task), f"{task}（未知任务）")
+
+
 RUN_STATUS_RUNNING = "RUNNING"
 RUN_STATUS_COMPLETED = "COMPLETED"
 RUN_STATUS_FAILED = "FAILED"

@@ -3,13 +3,13 @@
 用法：
     # 终端 1
     python app.py
-    # 终端 2
-    python tests/verify_live_e2e.py http://127.0.0.1:7860
+    # 终端 2（第二参数可选 segment / detect，默认 segment）
+    python tests/verify_live_e2e.py http://127.0.0.1:7860 [segment|detect]
 
 流程（对应 Spec §10 验收标准）：
     1. 连接服务，确认页面可访问
-    2. 上传 YOLO-Seg 数据集 ZIP → 校验类别数 / 训练・验证图片数
-    3. 上传 segment 模型 .pt
+    2. 上传数据集 ZIP（分割多边形标签 / 检测框标签）→ 校验类别数与任务类型
+    3. 上传对应任务的模型 .pt（segment / detect）
     4. 启动训练（epochs=1, batch=2, imgsz=320, CPU）
     5. 轮询状态 / 日志 / 指标，直到训练结束
     6. 下载 best.pt 与 results.csv
@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from helpers import build_dataset_zip, build_tiny_seg_pt  # noqa: E402
+from helpers import build_dataset_zip, build_tiny_detect_pt, build_tiny_seg_pt  # noqa: E402
 
 
 def _field(result, key):
@@ -75,8 +75,12 @@ def _status_from_history(history, run_id: str) -> str:
     return ""
 
 
-def main(url: str) -> int:
+def main(url: str, task: str = "segment") -> int:
     from gradio_client import Client, handle_file
+
+    if task not in ("segment", "detect"):
+        raise ValueError(f"未知任务类型: {task}（可选 segment / detect）")
+    metric_label = "Box mAP50" if task == "detect" else "Mask mAP50"
 
     work = Path(tempfile.mkdtemp(prefix="yolo_verify_"))
     print(f"[1/7] 连接服务 {url} ...")
@@ -97,17 +101,22 @@ def main(url: str) -> int:
         )
     print(f"      ✓ 已连接（{len(names)} 个接口，服务身份校验通过）")
 
-    print("[2/7] 生成并上传数据集 ZIP ...")
-    zip_path = build_dataset_zip(work / "verify_dataset.zip", n_train=4, n_val=2, classes=("shape",))
+    print(f"[2/7] 生成并上传【{task}】数据集 ZIP ...")
+    zip_path = build_dataset_zip(
+        work / "verify_dataset.zip", n_train=4, n_val=2, classes=("shape",),
+        label_mode="detection" if task == "detect" else "valid",
+    )
     msg, table, dropdown = client.predict(handle_file(zip_path), "验收数据集", api_name="/ui_import_dataset")
     assert "导入成功" in msg, f"数据集导入失败: {msg}"
     dataset_id = _field(dropdown, "value")
     print(f"      ✓ {msg.splitlines()[0]}\n      dataset_id={dataset_id}")
 
-    print("[3/7] 生成并上传 segment 权重 ...")
-    pt_path = build_tiny_seg_pt(work / "verify_seg.pt", nc=1)
+    print(f"[3/7] 生成并上传【{task}】权重 ...")
+    pt_path = (build_tiny_detect_pt if task == "detect" else build_tiny_seg_pt)(
+        work / f"verify_{task}.pt", nc=1
+    )
     msg, table, train_dd, infer_dd = client.predict(handle_file(pt_path), "验收模型", api_name="/ui_upload_model")
-    assert "上传成功" in msg, f"模型上传失败: {msg}"
+    assert "上传成功" in msg and task in msg, f"模型上传失败: {msg}"
     model_id = _field(train_dd, "value")
     print(f"      ✓ {msg.splitlines()[0]}\n      model_id={model_id}")
 
@@ -139,9 +148,10 @@ def main(url: str) -> int:
     config_md, hist_log, metrics_df, result_md, best_file, csv_file = client.predict(
         run_id, api_name="/ui_select_history"
     )
-    assert "最优 Mask mAP50" in result_md, f"结果摘要异常: {result_md[:500]}"
-    assert "Mask mAP50-95" in result_md
-    print(f"      ✓ 结果摘要: {result_md.splitlines()[2]}")
+    assert f"最优 {metric_label}" in result_md, f"结果摘要异常: {result_md[:500]}"
+    assert f"{metric_label}-95" in result_md
+    best_line = next((ln for ln in result_md.splitlines() if "最优" in ln), "")
+    print(f"      ✓ 结果摘要: {best_line}")
     n_metric_rows = len(metrics_df.get("data", [])) if isinstance(metrics_df, dict) else len(metrics_df or [])
     print(f"      ✓ 指标数据点数: {n_metric_rows}")
 
@@ -163,7 +173,8 @@ def main(url: str) -> int:
     )
     assert "检测到的实例总数" in stats, f"推理统计异常: {stats}"
     res = _file_path(result_file)
-    print(f"      ✓ {stats.splitlines()[2]}")
+    total_line = next((ln for ln in stats.splitlines() if "实例总数" in ln), "")
+    print(f"      ✓ {total_line}")
     print(f"      ✓ 推理结果图: {res} 存在={res.is_file() if res else False}")
 
     print("\n=========== 验收流程全部通过 ===========")
@@ -174,9 +185,10 @@ def main(url: str) -> int:
 
 if __name__ == "__main__":
     target = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:7860"
+    task = sys.argv[2] if len(sys.argv) > 2 else "segment"
     code = 0
     try:
-        code = main(target)
+        code = main(target, task)
     except AssertionError as e:
         print(f"\n✗ 验收失败: {e}")
         code = 1
