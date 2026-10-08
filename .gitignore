@@ -1,0 +1,28 @@
+# 存储目录内容不纳入版本管理，仅保留目录本身
+storage/*
+!storage/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 测试与临时产物
+.pytest_cache/
+.pytest_tmp/
+.verify_storage/
+.verify_port
+
+# 模型权重与数据集（体积大，不入库）
+*.pt
+*.onnx
+*.zip
+
+# 编辑器
+.idea/
+.vscode/
+.DS_Store
+# 训练副产物（例如 ultralytics 的 mlflow 目录）
+runs/

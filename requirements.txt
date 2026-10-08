@@ -1,0 +1,20 @@
+# YOLO Studio Lite 依赖（版本为开发环境实测通过的组合）
+#
+# 目标部署环境：Linux + Python 3.11 + NVIDIA GPU
+# PyTorch 需与服务器的 CUDA / NVIDIA 驱动匹配，请先按官网指引安装对应的 CUDA 版本，例如：
+#   pip install torch==2.9.0 torchvision==0.24.0 --index-url https://download.pytorch.org/whl/cu126
+# CPU 环境（无 GPU 时开发调试）：
+#   pip install torch==2.9.0 torchvision==0.24.0 --index-url https://download.pytorch.org/whl/cpu
+#
+# 若服务器无法访问公网，请使用内部 pip 镜像（如 --index-url <内部源>）安装。
+gradio==5.50.0
+ultralytics==8.4.80
+torch==2.9.0
+torchvision==0.24.0
+PyYAML==6.0.3
+Pillow==11.3.0
+numpy==2.2.6
+pandas==2.3.3
+
+# 测试
+pytest==9.0.3
