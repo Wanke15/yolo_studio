@@ -399,10 +399,14 @@ python -m pytest -m "not slow"   →   99 passed（跳过端到端训练）
 ### 9.2.1 内网测试机（tp001）上的同样验收
 
 在同一份代码部署到 `172.28.40.170:7870`、使用该机 Python 3.10 + gradio 5.23.0 + torch 2.6.0 后，
-用本地机器跨网络执行 `python tests/verify_live_e2e.py http://172.28.40.170:7870` → **7/7 全部通过**：
-数据集导入（类别数 1 / 训练 4 / 验证 2）→ 权重上传（6.43 MB）→ 训练启动并完成（日志 3→80 行）→
-最优 Mask mAP50 0.0000（未训练权重 1 epoch，符合预期）→ 下载 best.pt 6574 KB 与 results.csv →
-在线推理结果图生成成功。
+用本地机器跨网络执行验收脚本，**segment 与 detect 两种任务各自 7/7 全部通过**：
+
+| 任务 | 数据集/模型 | 训练 | 结果摘要 | 产物 |
+|---|---|---|---|---|
+| segment | 分割数据集（类别 1 / 训练 4 / 验证 2）+ segment 权重 | COMPLETED（日志 80 行） | 最优 **Mask mAP50 = 0.0137**，6 个指标点 | best.pt 6575 KB + results.csv |
+| detect | 检测数据集（自动识别为 detect）+ detect 权重 | COMPLETED（日志 80 行） | 最优 **Box mAP50 = 0.0000**，4 个指标点（无掩码列，符合预期） | best.pt 6057 KB + results.csv |
+
+两条流程的在线推理均正常出图（未训练权重 1 epoch → 实例数 0，属预期结果）。
 
 ### 9.3 异常的输入处理
 
